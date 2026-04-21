@@ -26,8 +26,8 @@ import SpeechRecognition, {
 import { useStore } from "@/lib/store";
 import { saveVideoBlob } from "@/lib/db";
 import { formatDuration, cn } from "@/lib/utils";
-import { transcribeBlob, warmupTranscriber } from "@/lib/transcribe";
 import { cuesToChapters } from "@/lib/chapters";
+import type { CaptionCue } from "@/lib/store";
 import Link from "next/link";
 
 type Mode = "screen-camera" | "screen" | "camera" | "audio";
@@ -69,6 +69,8 @@ export default function RecordingStudio() {
   const rafRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
   const composerVideosRef = useRef<HTMLVideoElement[]>([]);
+  const captionSegmentsRef = useRef<CaptionCue[]>([]);
+  const lastFinalLenRef = useRef<number>(0);
 
   // Bubble position/size
   const [bubble, setBubble] = useState({ x: 24, y: 24, w: 220, h: 220 });
@@ -91,6 +93,32 @@ export default function RecordingStudio() {
       }
     })();
   }, []);
+
+  // Capture live-speech final transcript segments with timestamps relative to
+  // recording start. These become the recording's captions (and chapters)
+  // instantly on Stop — no Whisper, no waiting.
+  useEffect(() => {
+    if (status !== "recording") return;
+    if (!finalTranscript) return;
+    const prevLen = lastFinalLenRef.current;
+    if (finalTranscript.length <= prevLen) return;
+    const newText = finalTranscript.slice(prevLen).trim();
+    lastFinalLenRef.current = finalTranscript.length;
+    if (!newText) return;
+
+    const now = (Date.now() - startTimeRef.current) / 1000;
+    const last = captionSegmentsRef.current[captionSegmentsRef.current.length - 1];
+    // Estimate start: prefer end of previous cue; otherwise ~1s of speech
+    // per ~3 words as a simple heuristic.
+    const wordCount = newText.split(/\s+/).filter(Boolean).length;
+    const estDuration = Math.max(1, Math.min(8, wordCount / 3));
+    const start = last ? last.end : Math.max(0, now - estDuration);
+    captionSegmentsRef.current.push({
+      start,
+      end: Math.max(start + 0.25, now),
+      text: newText,
+    });
+  }, [finalTranscript, status]);
 
   // Preview camera when idle and cameraOn
   useEffect(() => {
@@ -371,8 +399,9 @@ export default function RecordingStudio() {
       };
       rec.onstop = onRecordingStopped;
 
-      // Warm up the Whisper model in the background so it's ready by Stop.
-      try { warmupTranscriber(); } catch {}
+      // Reset live-caption buffers for this take.
+      captionSegmentsRef.current = [];
+      lastFinalLenRef.current = 0;
 
       rec.start(1000);
       startTimeRef.current = Date.now();
@@ -465,17 +494,20 @@ export default function RecordingStudio() {
 
       stopAllStreams();
       setStatus("stopped");
-      toast.success("Recording saved.");
 
-      // Kick off Whisper transcription in the BACKGROUND (non-blocking).
-      // Captions + chapters will stream into the watch page via the store
-      // when ready. This keeps save/redirect instant.
-      const hasAudio = mic || mode === "audio";
-      if (hasAudio) {
-        // Mark the recording as transcribing so the watch page can show an
-        // indicator. Don't await.
-        useStore.getState().updateRecording(rec.id, { transcribing: true });
-        runTranscriptionInBackground(blob, rec.id);
+      // Build captions + chapters instantly from the live speech stream we
+      // captured during recording (no post-processing, no model download).
+      const liveCues = captionSegmentsRef.current.slice();
+      if (liveCues.length > 0) {
+        const chapters = cuesToChapters(liveCues);
+        useStore
+          .getState()
+          .updateRecording(rec.id, { captions: liveCues, chapters });
+        toast.success(
+          `Saved · ${liveCues.length} captions · ${chapters.length} chapters`
+        );
+      } else {
+        toast.success("Recording saved.");
       }
 
       router.push(`/watch/${rec.shareId}`);
@@ -483,30 +515,6 @@ export default function RecordingStudio() {
       console.error(e);
       toast.error("Failed to save recording.");
     }
-  }
-
-  function runTranscriptionInBackground(blob: Blob, recordingId: string) {
-    transcribeBlob(blob, () => {})
-      .then(({ cues }) => {
-        const chapters = cuesToChapters(cues);
-        useStore.getState().updateRecording(recordingId, {
-          captions: cues,
-          chapters,
-          transcribing: false,
-        });
-        toast.success(
-          `Transcript ready · ${cues.length} cues · ${chapters.length} chapters`
-        );
-      })
-      .catch((e) => {
-        console.warn("Auto-transcription failed", e);
-        useStore
-          .getState()
-          .updateRecording(recordingId, { transcribing: false });
-        toast.message(
-          "Could not auto-generate captions. You can retry from the editor."
-        );
-      });
   }
 
   async function generateThumbnail(blob: Blob): Promise<string | undefined> {
