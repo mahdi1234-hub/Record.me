@@ -400,6 +400,7 @@ export default function WatchView({ shareId }: { shareId: string }) {
         <ShareModal
           url={shareUrl}
           title={recording.title}
+          shareId={recording.shareId}
           onClose={() => setShareOpen(false)}
         />
       )}

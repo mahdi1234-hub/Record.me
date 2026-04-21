@@ -4,6 +4,23 @@ import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { fetchFile, toBlobURL } from "@ffmpeg/util";
 
 let instance: FFmpeg | null = null;
+let fontBytesCache: Uint8Array | null = null;
+
+async function fetchFontBytes(): Promise<Uint8Array | null> {
+  if (fontBytesCache) return fontBytesCache;
+  try {
+    // Small open-source font bundled from jsdelivr (no auth / CORS issues)
+    const res = await fetch(
+      "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/inter/Inter%5Bslnt%2Cwght%5D.ttf"
+    );
+    if (!res.ok) return null;
+    const buf = new Uint8Array(await res.arrayBuffer());
+    fontBytesCache = buf;
+    return buf;
+  } catch {
+    return null;
+  }
+}
 
 export async function getFFmpeg(
   onLog?: (msg: string) => void,
@@ -80,6 +97,22 @@ export async function remuxForDownload(
   // has no duration in the header) and regenerate presentation timestamps
   // so the output MP4 has a correct duration + seek index.
   try {
+    // Burn the Record.me brand watermark into the pixels of the downloaded
+    // MP4 so it can't be stripped with CSS tricks. drawtext needs a font
+    // file inside ffmpeg's virtual FS.
+    const fontBytes = await fetchFontBytes();
+    if (fontBytes) {
+      try {
+        await ff.writeFile("brand.ttf", fontBytes);
+      } catch {
+        // non-fatal; drawtext will fall back to default font lookup
+      }
+    }
+    const watermarkFilter =
+      "drawtext=fontfile=/brand.ttf:text='● Record.me':" +
+      "fontcolor=white:fontsize=h/28:box=1:boxcolor=black@0.45:boxborderw=8:" +
+      "x=w-text_w-24:y=24";
+
     const args: string[] = [
       "-fflags",
       "+genpts+igndts",
@@ -93,6 +126,8 @@ export async function remuxForDownload(
       "cfr",
       "-r",
       "30",
+      "-vf",
+      watermarkFilter,
       "-c:v",
       "libx264",
       "-preset",

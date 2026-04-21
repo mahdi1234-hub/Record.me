@@ -28,6 +28,7 @@ import { saveVideoBlob } from "@/lib/db";
 import { formatDuration, cn } from "@/lib/utils";
 import { cuesToChapters } from "@/lib/chapters";
 import type { CaptionCue } from "@/lib/store";
+import { uploadRecordingToCloud } from "@/lib/cloud";
 import Link from "next/link";
 
 type Mode = "screen-camera" | "screen" | "camera" | "audio";
@@ -618,17 +619,44 @@ export default function RecordingStudio() {
       // Build captions + chapters instantly from the live speech stream we
       // captured during recording (no post-processing, no model download).
       const liveCues = captionSegmentsRef.current.slice();
+      let finalCaptions: CaptionCue[] | undefined;
+      let finalChapters: { title: string; start: number }[] | undefined;
       if (liveCues.length > 0) {
-        const chapters = cuesToChapters(liveCues);
+        finalCaptions = liveCues;
+        finalChapters = cuesToChapters(liveCues);
         useStore
           .getState()
-          .updateRecording(rec.id, { captions: liveCues, chapters });
+          .updateRecording(rec.id, {
+            captions: finalCaptions,
+            chapters: finalChapters,
+          });
         toast.success(
-          `Saved · ${liveCues.length} captions · ${chapters.length} chapters`
+          `Saved · ${liveCues.length} captions · ${finalChapters.length} chapters`
         );
       } else {
         toast.success("Recording saved.");
       }
+
+      // Fire-and-forget cloud upload so the recording is embeddable on any
+      // website via /embed/{shareId} and /widget.js. If Blob storage isn't
+      // configured on the server, this is a silent no-op — local flow is
+      // unchanged.
+      void uploadRecordingToCloud({
+        shareId: rec.shareId,
+        title,
+        createdAt: rec.createdAt,
+        durationSec: duration,
+        mode,
+        videoBlob: blob,
+        captions: finalCaptions,
+        chapters: finalChapters,
+      }).then((cloud) => {
+        if (cloud?.videoUrl) {
+          useStore
+            .getState()
+            .updateRecording(rec.id, { cloudVideoUrl: cloud.videoUrl });
+        }
+      });
 
       router.push(`/watch/${rec.shareId}`);
     } catch (e) {

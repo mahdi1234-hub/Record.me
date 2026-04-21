@@ -31,6 +31,12 @@ export type Recording = {
   chapters?: { title: string; start: number }[];
   transcribing?: boolean;
   thumbnailDataUrl?: string;
+  /**
+   * Public video URL (Vercel Blob) used by the iframe embed route so the
+   * recording can be played on third-party sites. `undefined` when the
+   * recording hasn't been uploaded (cloud storage disabled / offline).
+   */
+  cloudVideoUrl?: string;
   shareId: string;
   analytics: {
     views: number;

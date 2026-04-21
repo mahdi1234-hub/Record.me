@@ -215,6 +215,20 @@ export default function VideoPlayer({
         </div>
       )}
 
+      {/* Brand watermark — persistent, clickable, linked to the SaaS.
+          pointer-events-auto so viewers can click through to Record.me. */}
+      <a
+        href="https://record-me-six.vercel.app?utm_source=watermark"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="absolute top-3 right-3 z-20 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/50 hover:bg-black/70 backdrop-blur-sm text-white text-xs font-semibold select-none transition-colors"
+        aria-label="Made with Record.me"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <span className="size-1.5 rounded-full bg-[var(--primary)]" />
+        Record.me
+      </a>
+
       {/* Center play button when paused */}
       {!playing && (
         <button

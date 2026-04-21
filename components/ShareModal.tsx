@@ -1,28 +1,48 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Check, Copy, X, Mail, Code2 } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ShareModal({
   url,
   title,
+  shareId,
   onClose,
 }: {
   url: string;
   title: string;
+  shareId: string;
   onClose: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [tab, setTab] = useState<"share" | "embed">("share");
+  const [embedKind, setEmbedKind] = useState<"iframe" | "widget">("iframe");
 
-  const embedCode = `<iframe src="${url}?embed=1" width="640" height="360" frameborder="0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>`;
+  const origin = useMemo(
+    () => (typeof window !== "undefined" ? window.location.origin : ""),
+    []
+  );
+  const embedUrl = `${origin}/embed/${shareId}`;
 
-  function copy(text: string) {
+  const iframeCode = `<iframe
+  src="${embedUrl}"
+  width="640"
+  height="360"
+  frameborder="0"
+  allow="autoplay; fullscreen; picture-in-picture; clipboard-write"
+  allowfullscreen
+  style="border:0;border-radius:12px;overflow:hidden"
+></iframe>`;
+
+  const widgetCode = `<div data-recordme="${shareId}" data-title="${title.replace(/"/g, "&quot;")}" data-button="Watch video"></div>
+<script async src="${origin}/widget.js"></script>`;
+
+  function copy(text: string, key: string) {
     navigator.clipboard.writeText(text);
-    setCopied(true);
+    setCopiedKey(key);
     toast.success("Copied to clipboard");
-    setTimeout(() => setCopied(false), 1500);
+    setTimeout(() => setCopiedKey(null), 1500);
   }
 
   return (
@@ -75,17 +95,12 @@ export default function ShareModal({
                 className="flex-1 h-11 rounded-full border border-[var(--border)] bg-[var(--muted)] px-4 text-sm font-mono"
               />
               <button
-                onClick={() => copy(url)}
+                onClick={() => copy(url, "url")}
                 className="inline-flex items-center gap-1.5 h-11 px-4 rounded-full bg-[var(--primary)] text-white text-sm font-semibold"
               >
-                {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-                {copied ? "Copied" : "Copy"}
+                {copiedKey === "url" ? <Check className="size-4" /> : <Copy className="size-4" />}
+                {copiedKey === "url" ? "Copied" : "Copy"}
               </button>
-            </div>
-            <div className="text-xs text-zinc-500 mt-3">
-              Note: recordings are stored locally in your browser. For a
-              production SaaS, wire this modal to your storage backend (S3,
-              Cloudflare R2, etc).
             </div>
             <div className="mt-5">
               <div className="text-xs font-semibold text-zinc-500 mb-2">
@@ -125,21 +140,73 @@ export default function ShareModal({
           </div>
         ) : (
           <div className="p-5">
+            <div className="inline-flex rounded-full bg-[var(--muted)] p-1 text-xs mb-3">
+              <button
+                onClick={() => setEmbedKind("iframe")}
+                className={
+                  "px-3 py-1.5 rounded-full " +
+                  (embedKind === "iframe"
+                    ? "bg-white shadow font-semibold"
+                    : "text-zinc-500")
+                }
+              >
+                Iframe
+              </button>
+              <button
+                onClick={() => setEmbedKind("widget")}
+                className={
+                  "px-3 py-1.5 rounded-full " +
+                  (embedKind === "widget"
+                    ? "bg-white shadow font-semibold"
+                    : "text-zinc-500")
+                }
+              >
+                Modal widget
+              </button>
+            </div>
+
             <div className="text-xs text-zinc-500 mb-2 flex items-center gap-1.5">
               <Code2 className="size-4" />
-              Paste this iframe snippet to embed the video on your site.
+              {embedKind === "iframe"
+                ? "Paste this iframe snippet to embed the video on any page."
+                : "Drop this on any site — opens the video in a modal popup."}
             </div>
             <textarea
               readOnly
-              value={embedCode}
-              className="w-full h-32 rounded-xl border border-[var(--border)] bg-[var(--muted)] p-3 text-xs font-mono"
+              value={embedKind === "iframe" ? iframeCode : widgetCode}
+              className="w-full h-36 rounded-xl border border-[var(--border)] bg-[var(--muted)] p-3 text-xs font-mono"
             />
-            <button
-              onClick={() => copy(embedCode)}
-              className="mt-3 inline-flex items-center gap-1.5 h-10 px-4 rounded-full bg-[var(--primary)] text-white text-sm font-semibold"
-            >
-              <Copy className="size-4" /> Copy embed code
-            </button>
+            <div className="flex items-center gap-2 mt-3">
+              <button
+                onClick={() =>
+                  copy(
+                    embedKind === "iframe" ? iframeCode : widgetCode,
+                    embedKind
+                  )
+                }
+                className="inline-flex items-center gap-1.5 h-10 px-4 rounded-full bg-[var(--primary)] text-white text-sm font-semibold"
+              >
+                {copiedKey === embedKind ? (
+                  <Check className="size-4" />
+                ) : (
+                  <Copy className="size-4" />
+                )}
+                {copiedKey === embedKind ? "Copied" : "Copy snippet"}
+              </button>
+              <a
+                href={embedUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 h-10 px-4 rounded-full bg-[var(--muted)] text-sm hover:bg-zinc-100"
+              >
+                Preview
+              </a>
+            </div>
+            <p className="text-[11px] text-zinc-400 mt-3 leading-relaxed">
+              The recording is served from <code>{origin}/embed/…</code> with
+              <code> frame-ancestors *</code> so it renders inside any iframe.
+              Embeds keep the built-in Record.me watermark.
+            </p>
           </div>
         )}
       </div>
