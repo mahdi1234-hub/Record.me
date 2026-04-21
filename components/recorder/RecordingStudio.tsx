@@ -387,7 +387,11 @@ export default function RecordingStudio() {
       if (liveCaptions && (mic || mode === "audio") && browserSupportsSpeechRecognition) {
         resetTranscript();
         try {
-          await SpeechRecognition.startListening({ continuous: true, interimResults: true });
+          await SpeechRecognition.startListening({
+            continuous: true,
+            interimResults: true,
+            language: "en-US",
+          });
         } catch (e) {
           console.warn("Could not start live captions", e);
         }
