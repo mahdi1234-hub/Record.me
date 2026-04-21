@@ -1,5 +1,6 @@
 "use client";
 
+import "regenerator-runtime/runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Rnd } from "react-rnd";
@@ -14,13 +15,20 @@ import {
   Video as VideoIcon,
   X,
   ChevronLeft,
+  Loader2,
+  Captions as CaptionsIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { nanoid } from "nanoid";
 import fixWebmDuration from "fix-webm-duration";
+import SpeechRecognition, {
+  useSpeechRecognition,
+} from "react-speech-recognition";
 import { useStore } from "@/lib/store";
 import { saveVideoBlob } from "@/lib/db";
 import { formatDuration, cn } from "@/lib/utils";
+import { transcribeBlob } from "@/lib/transcribe";
+import { cuesToChapters } from "@/lib/chapters";
 import Link from "next/link";
 
 type Mode = "screen-camera" | "screen" | "camera" | "audio";
@@ -38,6 +46,19 @@ export default function RecordingStudio() {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedCamId, setSelectedCamId] = useState<string | null>(null);
   const [selectedMicId, setSelectedMicId] = useState<string | null>(null);
+  const [liveCaptions, setLiveCaptions] = useState(true);
+  const [transcribing, setTranscribing] = useState(false);
+  const [transcribeStatus, setTranscribeStatus] = useState("");
+  const [transcribeProgress, setTranscribeProgress] = useState(0);
+
+  const {
+    transcript,
+    interimTranscript,
+    finalTranscript,
+    listening,
+    resetTranscript,
+    browserSupportsSpeechRecognition,
+  } = useSpeechRecognition();
 
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const screenVideoRef = useRef<HTMLVideoElement>(null);
@@ -51,6 +72,7 @@ export default function RecordingStudio() {
   const startTimeRef = useRef<number>(0);
   const rafRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
+  const composerVideosRef = useRef<HTMLVideoElement[]>([]);
 
   // Bubble position/size
   const [bubble, setBubble] = useState({ x: 24, y: 24, w: 220, h: 220 });
@@ -115,6 +137,17 @@ export default function RecordingStudio() {
     screenStreamRef.current = null;
     cameraStreamRef.current = null;
     micStreamRef.current = null;
+    composerVideosRef.current.forEach((v) => {
+      try {
+        v.pause();
+        v.srcObject = null;
+      } catch {}
+    });
+    composerVideosRef.current = [];
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -207,12 +240,34 @@ export default function RecordingStudio() {
   function composeScreenCamera(): MediaStream {
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
-    const screenVideo = screenVideoRef.current!;
-    const camVideo = cameraVideoRef.current!;
 
-    screenVideo.srcObject = screenStreamRef.current!;
+    // Use detached video elements for the compositor so we don't depend on the
+    // conditionally-rendered preview <video> nodes (they don't exist until
+    // `status !== "idle"`, which happens AFTER this function runs).
+    const screenVideo = document.createElement("video");
     screenVideo.muted = true;
+    screenVideo.playsInline = true;
+    screenVideo.srcObject = screenStreamRef.current!;
     screenVideo.play().catch(() => {});
+    composerVideosRef.current.push(screenVideo);
+
+    const camVideo = document.createElement("video");
+    camVideo.muted = true;
+    camVideo.playsInline = true;
+    camVideo.srcObject = cameraStreamRef.current!;
+    camVideo.play().catch(() => {});
+    composerVideosRef.current.push(camVideo);
+
+    // Also mirror the screen stream into the preview <video> when it mounts.
+    const attachPreview = () => {
+      if (screenVideoRef.current && !screenVideoRef.current.srcObject) {
+        screenVideoRef.current.srcObject = screenStreamRef.current;
+        screenVideoRef.current.play().catch(() => {});
+      }
+    };
+    attachPreview();
+    const previewInterval = window.setInterval(attachPreview, 150);
+    window.setTimeout(() => window.clearInterval(previewInterval), 3000);
 
     // Resolution: base on screen track settings
     const track = screenStreamRef.current!.getVideoTracks()[0];
@@ -327,6 +382,17 @@ export default function RecordingStudio() {
       timerRef.current = window.setInterval(() => {
         setElapsed((e) => e + 1);
       }, 1000);
+
+      // Kick off live captions
+      if (liveCaptions && (mic || mode === "audio") && browserSupportsSpeechRecognition) {
+        resetTranscript();
+        try {
+          await SpeechRecognition.startListening({ continuous: true, interimResults: true });
+        } catch (e) {
+          console.warn("Could not start live captions", e);
+        }
+      }
+
       toast.success("Recording started");
     } catch (e) {
       console.error(e);
@@ -358,6 +424,9 @@ export default function RecordingStudio() {
       } catch {}
     }
     if (timerRef.current) window.clearInterval(timerRef.current);
+    if (listening) {
+      SpeechRecognition.stopListening().catch(() => {});
+    }
   }
 
   async function onRecordingStopped() {
@@ -393,11 +462,55 @@ export default function RecordingStudio() {
 
       stopAllStreams();
       setStatus("stopped");
-      toast.success("Recording saved!");
+      toast.success("Recording saved. Generating captions & chapters…");
+
+      // Run Whisper on the audio for word-level timestamps, then build chapters.
+      // Audio-bearing modes only; camera-only / audio / screen+camera / screen (w/ mic)
+      // all have audio in the blob.
+      const hasAudio = mic || mode === "audio";
+      if (hasAudio) {
+        await runTranscription(blob, rec.id);
+      }
+
       router.push(`/watch/${rec.shareId}`);
     } catch (e) {
       console.error(e);
       toast.error("Failed to save recording.");
+    }
+  }
+
+  async function runTranscription(blob: Blob, recordingId: string) {
+    setTranscribing(true);
+    setTranscribeStatus("Preparing model…");
+    setTranscribeProgress(0);
+    try {
+      const { cues } = await transcribeBlob(blob, (p) => {
+        if (p.type === "download") {
+          setTranscribeStatus(`Downloading ${p.name}`);
+          setTranscribeProgress(p.progress ?? 0);
+        } else if (p.type === "loading") {
+          setTranscribeStatus(p.message);
+        } else if (p.type === "transcribing") {
+          setTranscribeStatus("Transcribing audio…");
+          setTranscribeProgress((p.progress ?? 0) * 100);
+        }
+      });
+      const chapters = cuesToChapters(cues);
+      useStore
+        .getState()
+        .updateRecording(recordingId, { captions: cues, chapters });
+      toast.success(
+        `Transcript ready · ${cues.length} cues · ${chapters.length} chapters`
+      );
+    } catch (e) {
+      console.warn("Auto-transcription failed", e);
+      toast.message(
+        "Could not auto-generate captions. You can retry from the editor."
+      );
+    } finally {
+      setTranscribing(false);
+      setTranscribeStatus("");
+      setTranscribeProgress(0);
     }
   }
 
@@ -564,6 +677,22 @@ export default function RecordingStudio() {
             />
           )}
 
+          {/* Live captions overlay */}
+          {liveCaptions &&
+            (status === "recording" || status === "paused") &&
+            (finalTranscript || interimTranscript) && (
+              <div className="absolute left-1/2 -translate-x-1/2 bottom-4 max-w-[85%] pointer-events-none">
+                <div className="rounded-xl bg-black/65 backdrop-blur px-4 py-2 text-center shadow-lg">
+                  <span className="text-white text-base md:text-lg leading-snug">
+                    {finalTranscript}
+                  </span>{" "}
+                  <span className="text-yellow-300 text-base md:text-lg leading-snug">
+                    {interimTranscript}
+                  </span>
+                </div>
+              </div>
+            )}
+
           {countdown !== null && (
             <div className="absolute inset-0 bg-black/60 grid place-items-center">
               <div className="text-white text-[120px] font-bold tabular-nums">
@@ -575,6 +704,64 @@ export default function RecordingStudio() {
 
         {/* Hidden compositing canvas */}
         <canvas ref={canvasRef} className="hidden" />
+
+        {/* Live captions toggle hint */}
+        {(mic || mode === "audio") && (
+          <div className="mt-3 flex items-center justify-between bg-white border border-[var(--border)] rounded-xl px-4 py-2 text-sm">
+            <div className="flex items-center gap-2">
+              <CaptionsIcon className="size-4 text-[var(--primary)]" />
+              <span className="font-medium">Live captions</span>
+              {!browserSupportsSpeechRecognition && (
+                <span className="text-xs text-amber-600">
+                  (Not supported in this browser — use Chrome)
+                </span>
+              )}
+              {listening && (
+                <span className="text-xs text-emerald-600 inline-flex items-center gap-1">
+                  <span className="size-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Listening
+                </span>
+              )}
+            </div>
+            <button
+              onClick={() => setLiveCaptions((v) => !v)}
+              disabled={status !== "idle"}
+              className={cn(
+                "h-8 px-3 rounded-full text-xs font-semibold border",
+                liveCaptions
+                  ? "bg-[var(--primary)] text-white border-transparent"
+                  : "bg-white text-zinc-700 border-[var(--border)]",
+                status !== "idle" && "opacity-60 cursor-not-allowed"
+              )}
+            >
+              {liveCaptions ? "On" : "Off"}
+            </button>
+          </div>
+        )}
+
+        {/* Transcription progress modal */}
+        {transcribing && (
+          <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4">
+            <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
+              <div className="flex items-center gap-3 mb-3">
+                <Loader2 className="size-5 animate-spin text-[var(--primary)]" />
+                <div className="font-semibold">Generating captions & chapters</div>
+              </div>
+              <p className="text-sm text-zinc-600 mb-4">
+                {transcribeStatus || "Running Whisper on the audio…"}
+              </p>
+              <div className="h-2 rounded-full bg-zinc-100 overflow-hidden">
+                <div
+                  className="h-full bg-[var(--primary)] transition-all"
+                  style={{ width: `${Math.min(100, Math.max(4, transcribeProgress))}%` }}
+                />
+              </div>
+              <p className="text-[11px] text-zinc-400 mt-3">
+                First run downloads the Whisper model (~75&nbsp;MB). Cached afterward.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Device + toggles */}
         <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
