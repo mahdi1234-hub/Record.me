@@ -69,6 +69,8 @@ export default function RecordingStudio() {
   const rafRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
   const composerVideosRef = useRef<HTMLVideoElement[]>([]);
+  const composerIntervalRef = useRef<number | null>(null);
+  const composerStopRef = useRef<(() => void) | null>(null);
   const captionSegmentsRef = useRef<CaptionCue[]>([]);
   const lastFinalLenRef = useRef<number>(0);
 
@@ -171,6 +173,14 @@ export default function RecordingStudio() {
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
+    }
+    if (composerIntervalRef.current) {
+      window.clearInterval(composerIntervalRef.current);
+      composerIntervalRef.current = null;
+    }
+    if (composerStopRef.current) {
+      composerStopRef.current();
+      composerStopRef.current = null;
     }
   }, []);
 
@@ -299,7 +309,6 @@ export default function RecordingStudio() {
     canvas.width = settings.width ?? 1280;
     canvas.height = settings.height ?? 720;
 
-    let raf = 0;
     const draw = () => {
       if (screenVideo.readyState >= 2) {
         ctx.drawImage(screenVideo, 0, 0, canvas.width, canvas.height);
@@ -343,11 +352,33 @@ export default function RecordingStudio() {
         ctx.lineWidth = 4;
         ctx.stroke();
       }
-
-      raf = requestAnimationFrame(draw);
     };
-    raf = requestAnimationFrame(draw);
-    rafRef.current = raf;
+
+    // Drive the compositor with requestVideoFrameCallback (fires whenever the
+    // screen MediaStream delivers a new frame — continues in background
+    // tabs) + a setInterval fallback so the camera bubble updates even when
+    // the screen stream is idle (static window). Both are NOT throttled the
+    // same way as requestAnimationFrame.
+    let stopped = false;
+    const anyScreen = screenVideo as unknown as {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+    };
+    const scheduleVFC = () => {
+      if (stopped) return;
+      if (typeof anyScreen.requestVideoFrameCallback === "function") {
+        anyScreen.requestVideoFrameCallback!(() => {
+          draw();
+          scheduleVFC();
+        });
+      }
+    };
+    scheduleVFC();
+    // Fallback tick: ensures draws happen even when no new screen frame
+    // arrives (e.g. static window) and keeps camera bubble animated.
+    composerIntervalRef.current = window.setInterval(draw, 1000 / 30);
+    composerStopRef.current = () => {
+      stopped = true;
+    };
 
     const canvasStream = canvas.captureStream(30);
 
