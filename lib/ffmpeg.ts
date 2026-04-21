@@ -65,7 +65,8 @@ export async function trimVideo(
  */
 export async function remuxForDownload(
   blob: Blob,
-  onProgress?: (ratio: number) => void
+  onProgress?: (ratio: number) => void,
+  knownDurationSec?: number
 ): Promise<{ blob: Blob; extension: string; mime: string }> {
   const ff = await getFFmpeg(undefined, onProgress);
   const inputName = "download_in.webm";
@@ -74,10 +75,24 @@ export async function remuxForDownload(
 
   // H.264/AAC MP4 is universally playable. faststart moves moov atom to
   // the beginning so the download file opens/scrubs instantly.
+  //
+  // Input flags force ffmpeg to fully probe the MediaRecorder webm (which
+  // has no duration in the header) and regenerate presentation timestamps
+  // so the output MP4 has a correct duration + seek index.
   try {
-    await ff.exec([
+    const args: string[] = [
+      "-fflags",
+      "+genpts+igndts",
+      "-analyzeduration",
+      "200M",
+      "-probesize",
+      "200M",
       "-i",
       inputName,
+      "-vsync",
+      "cfr",
+      "-r",
+      "30",
       "-c:v",
       "libx264",
       "-preset",
@@ -92,8 +107,14 @@ export async function remuxForDownload(
       "+faststart",
       "-pix_fmt",
       "yuv420p",
-      outputName,
-    ]);
+    ];
+    // If we know the exact recording duration, use it to cap the output
+    // precisely — guarantees the MP4 length matches the original take.
+    if (knownDurationSec && isFinite(knownDurationSec) && knownDurationSec > 0) {
+      args.push("-t", knownDurationSec.toFixed(3));
+    }
+    args.push(outputName);
+    await ff.exec(args);
     const data = (await ff.readFile(outputName)) as Uint8Array;
     await ff.deleteFile(inputName).catch(() => {});
     await ff.deleteFile(outputName).catch(() => {});
@@ -105,10 +126,26 @@ export async function remuxForDownload(
       mime: "video/mp4",
     };
   } catch (e) {
-    // Fallback: webm stream copy with duration/cues rewritten.
+    // Fallback: webm re-encode with forced CFR so duration is correct.
     console.warn("mp4 remux failed, falling back to webm remux", e);
     const fallbackOut = "download_out.webm";
-    await ff.exec(["-i", inputName, "-c", "copy", fallbackOut]);
+    const fbArgs: string[] = [
+      "-fflags",
+      "+genpts",
+      "-analyzeduration",
+      "200M",
+      "-probesize",
+      "200M",
+      "-i",
+      inputName,
+      "-c",
+      "copy",
+    ];
+    if (knownDurationSec && isFinite(knownDurationSec) && knownDurationSec > 0) {
+      fbArgs.push("-t", knownDurationSec.toFixed(3));
+    }
+    fbArgs.push(fallbackOut);
+    await ff.exec(fbArgs);
     const data = (await ff.readFile(fallbackOut)) as Uint8Array;
     await ff.deleteFile(inputName).catch(() => {});
     await ff.deleteFile(fallbackOut).catch(() => {});

@@ -198,7 +198,8 @@ export default function WatchView({ shareId }: { shareId: string }) {
                     }
                     const { blob, extension } = await remuxForDownload(
                       src,
-                      (r) => setDownloadProgress(Math.round(r * 100))
+                      (r) => setDownloadProgress(Math.round(r * 100)),
+                      recording.durationSec
                     );
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement("a");
