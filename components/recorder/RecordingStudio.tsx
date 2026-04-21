@@ -74,8 +74,14 @@ export default function RecordingStudio() {
   const captionSegmentsRef = useRef<CaptionCue[]>([]);
   const lastFinalLenRef = useRef<number>(0);
 
-  // Bubble position/size
+  // Bubble position/size. Kept in a ref so the canvas compositor reads the
+  // latest position on every draw frame (dragging during recording updates
+  // the bubble in the recorded video in real time).
   const [bubble, setBubble] = useState({ x: 24, y: 24, w: 220, h: 220 });
+  const bubbleRef = useRef(bubble);
+  useEffect(() => {
+    bubbleRef.current = bubble;
+  }, [bubble]);
 
   // Populate devices
   useEffect(() => {
@@ -317,17 +323,21 @@ export default function RecordingStudio() {
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
 
-      // Camera bubble
+      // Camera bubble — read latest position from the ref so the recording
+      // follows the user's drag in real time.
+      const bub = bubbleRef.current;
       if (cameraOn && camVideo.readyState >= 2) {
-        const size = Math.min(canvas.width, canvas.height) * 0.22;
-        // Map bubble position (from CSS preview) to canvas coordinates
+        // Map bubble size/position (in preview CSS px) to canvas coordinates.
         const previewRect = canvasPreviewRef.current?.getBoundingClientRect();
         let relX = 0.04;
         let relY = 0.04;
-        if (previewRect) {
-          relX = bubble.x / previewRect.width;
-          relY = bubble.y / previewRect.height;
+        let relW = 0.22;
+        if (previewRect && previewRect.width > 0 && previewRect.height > 0) {
+          relX = bub.x / previewRect.width;
+          relY = bub.y / previewRect.height;
+          relW = bub.w / previewRect.width;
         }
+        const size = Math.max(60, canvas.width * relW);
         const cx = canvas.width * relX + size / 2;
         const cy = canvas.height * relY + size / 2;
         const r = size / 2;
@@ -676,7 +686,16 @@ export default function RecordingStudio() {
             <Rnd
               size={{ width: bubble.w, height: bubble.h }}
               position={{ x: bubble.x, y: bubble.y }}
+              onDrag={(_, d) => setBubble((b) => ({ ...b, x: d.x, y: d.y }))}
               onDragStop={(_, d) => setBubble((b) => ({ ...b, x: d.x, y: d.y }))}
+              onResize={(_, __, ref, ___, pos) =>
+                setBubble({
+                  w: parseInt(ref.style.width),
+                  h: parseInt(ref.style.width),
+                  x: pos.x,
+                  y: pos.y,
+                })
+              }
               onResizeStop={(_, __, ref, ___, pos) =>
                 setBubble({
                   w: parseInt(ref.style.width),
