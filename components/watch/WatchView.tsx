@@ -16,6 +16,7 @@ import {
 import { toast } from "sonner";
 import { useStore } from "@/lib/store";
 import { loadVideoBlob } from "@/lib/db";
+import { remuxForDownload } from "@/lib/ffmpeg";
 import VideoPlayer from "@/components/player/VideoPlayer";
 import { formatDuration, formatRelative } from "@/lib/utils";
 import ShareModal from "@/components/ShareModal";
@@ -40,6 +41,8 @@ export default function WatchView({ shareId }: { shareId: string }) {
   >([]);
   const [newComment, setNewComment] = useState("");
   const [currentTime, setCurrentTime] = useState(0);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
 
   useEffect(() => {
     if (!recording) return;
@@ -181,15 +184,46 @@ export default function WatchView({ shareId }: { shareId: string }) {
               >
                 <Copy className="size-4" /> Copy link
               </button>
-              {videoUrl && (
-                <a
-                  href={videoUrl}
-                  download={`${recording.title.replace(/\s+/g, "_")}.webm`}
-                  className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full bg-white/10 text-white text-sm"
-                >
-                  <Download className="size-4" /> Download
-                </a>
-              )}
+              <button
+                disabled={downloading}
+                onClick={async () => {
+                  if (!recording) return;
+                  try {
+                    setDownloading(true);
+                    setDownloadProgress(0);
+                    const src = await loadVideoBlob(recording.id);
+                    if (!src) {
+                      toast.error("Recording file not found on this device.");
+                      return;
+                    }
+                    const { blob, extension } = await remuxForDownload(
+                      src,
+                      (r) => setDownloadProgress(Math.round(r * 100))
+                    );
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `${recording.title.replace(/\s+/g, "_")}.${extension}`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    toast.success("Download ready.");
+                  } catch (e) {
+                    console.error("download failed", e);
+                    toast.error("Could not prepare download.");
+                  } finally {
+                    setDownloading(false);
+                    setDownloadProgress(0);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full bg-white/10 hover:bg-white/20 disabled:opacity-60 text-white text-sm"
+              >
+                <Download className="size-4" />
+                {downloading
+                  ? `Preparing… ${downloadProgress}%`
+                  : "Download"}
+              </button>
             </div>
           </div>
         </div>
