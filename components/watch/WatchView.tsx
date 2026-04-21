@@ -239,6 +239,16 @@ export default function WatchView({ shareId }: { shareId: string }) {
                     </button>
                   );
                 })
+              ) : recording.transcribing ? (
+                <div className="text-white/60 text-sm text-center py-8">
+                  <div className="inline-flex items-center gap-2">
+                    <span className="size-2 rounded-full bg-[var(--primary)] animate-pulse" />
+                    Generating transcript in the background…
+                  </div>
+                  <p className="text-[11px] text-white/40 mt-2">
+                    First run downloads the Whisper model (~75&nbsp;MB). Cached afterward.
+                  </p>
+                </div>
               ) : (
                 <div className="text-white/50 text-sm text-center py-8">
                   <p>No transcript yet.</p>
@@ -271,6 +281,11 @@ export default function WatchView({ shareId }: { shareId: string }) {
                     <div className="font-medium">{ch.title}</div>
                   </button>
                 ))
+              ) : recording.transcribing ? (
+                <div className="text-white/60 text-sm text-center py-8 inline-flex items-center gap-2 justify-center w-full">
+                  <span className="size-2 rounded-full bg-[var(--primary)] animate-pulse" />
+                  Generating chapters…
+                </div>
               ) : (
                 <div className="text-white/50 text-sm text-center py-8">
                   No chapters yet. Add them from the editor.

@@ -6,33 +6,55 @@ import { pipeline, env } from "@xenova/transformers";
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
-type InMsg = {
-  audio: Float32Array;
-  model: string;
-};
+type InMsg =
+  | { audio: Float32Array; model: string; warmup?: false }
+  | { warmup: true; model: string };
 
 let transcriber: any = null;
+let loadingPromise: Promise<any> | null = null;
+
+function loadPipeline(model: string) {
+  if (transcriber) return Promise.resolve(transcriber);
+  if (loadingPromise) return loadingPromise;
+  loadingPromise = pipeline("automatic-speech-recognition", model, {
+    progress_callback: (p: any) => {
+      if (p.status === "progress") {
+        self.postMessage({
+          type: "download",
+          name: p.file,
+          progress: p.progress ?? 0,
+        });
+      } else if (p.status === "ready" || p.status === "done") {
+        self.postMessage({ type: "loading", message: "Ready" });
+      } else {
+        self.postMessage({ type: "loading", message: p.status });
+      }
+    },
+  }).then((t: any) => {
+    transcriber = t;
+    loadingPromise = null;
+    return t;
+  });
+  return loadingPromise;
+}
 
 self.addEventListener("message", async (e: MessageEvent<InMsg>) => {
-  const { audio, model } = e.data;
-  try {
-    if (!transcriber) {
-      transcriber = await pipeline("automatic-speech-recognition", model, {
-        progress_callback: (p: any) => {
-          if (p.status === "progress") {
-            self.postMessage({
-              type: "download",
-              name: p.file,
-              progress: p.progress ?? 0,
-            });
-          } else if (p.status === "ready" || p.status === "done") {
-            self.postMessage({ type: "loading", message: "Ready" });
-          } else {
-            self.postMessage({ type: "loading", message: p.status });
-          }
-        },
-      });
+  const data = e.data;
+
+  // Warmup: kick off model download without running inference.
+  if ((data as any).warmup) {
+    try {
+      await loadPipeline(data.model);
+      self.postMessage({ type: "loading", message: "Model ready" });
+    } catch (err: any) {
+      console.error("warmup failed", err);
     }
+    return;
+  }
+
+  const { audio, model } = data as { audio: Float32Array; model: string };
+  try {
+    await loadPipeline(model);
 
     self.postMessage({ type: "transcribing", progress: 0 });
 

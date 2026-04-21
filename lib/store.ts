@@ -29,6 +29,7 @@ export type Recording = {
   trim?: { start: number; end: number };
   captions?: CaptionCue[];
   chapters?: { title: string; start: number }[];
+  transcribing?: boolean;
   thumbnailDataUrl?: string;
   shareId: string;
   analytics: {

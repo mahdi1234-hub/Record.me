@@ -10,6 +10,7 @@ type TranscribeProgress =
   | { type: "error"; message: string };
 
 let worker: Worker | null = null;
+let warmedUp = false;
 
 function getWorker(): Worker {
   if (!worker) {
@@ -18,6 +19,24 @@ function getWorker(): Worker {
     });
   }
   return worker;
+}
+
+/**
+ * Fire-and-forget: start downloading and initializing the Whisper model so
+ * it's ready by the time the user stops recording. Safe to call multiple times.
+ */
+export function warmupTranscriber(
+  model: "Xenova/whisper-tiny" | "Xenova/whisper-base" = "Xenova/whisper-tiny"
+) {
+  if (warmedUp) return;
+  warmedUp = true;
+  try {
+    const w = getWorker();
+    w.postMessage({ warmup: true, model });
+  } catch (e) {
+    warmedUp = false;
+    console.warn("warmupTranscriber failed", e);
+  }
 }
 
 export async function transcribeBlob(

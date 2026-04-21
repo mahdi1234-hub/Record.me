@@ -15,7 +15,6 @@ import {
   Video as VideoIcon,
   X,
   ChevronLeft,
-  Loader2,
   Captions as CaptionsIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -27,7 +26,7 @@ import SpeechRecognition, {
 import { useStore } from "@/lib/store";
 import { saveVideoBlob } from "@/lib/db";
 import { formatDuration, cn } from "@/lib/utils";
-import { transcribeBlob } from "@/lib/transcribe";
+import { transcribeBlob, warmupTranscriber } from "@/lib/transcribe";
 import { cuesToChapters } from "@/lib/chapters";
 import Link from "next/link";
 
@@ -47,9 +46,6 @@ export default function RecordingStudio() {
   const [selectedCamId, setSelectedCamId] = useState<string | null>(null);
   const [selectedMicId, setSelectedMicId] = useState<string | null>(null);
   const [liveCaptions, setLiveCaptions] = useState(true);
-  const [transcribing, setTranscribing] = useState(false);
-  const [transcribeStatus, setTranscribeStatus] = useState("");
-  const [transcribeProgress, setTranscribeProgress] = useState(0);
 
   const {
     transcript,
@@ -375,6 +371,9 @@ export default function RecordingStudio() {
       };
       rec.onstop = onRecordingStopped;
 
+      // Warm up the Whisper model in the background so it's ready by Stop.
+      try { warmupTranscriber(); } catch {}
+
       rec.start(1000);
       startTimeRef.current = Date.now();
       setStatus("recording");
@@ -466,14 +465,17 @@ export default function RecordingStudio() {
 
       stopAllStreams();
       setStatus("stopped");
-      toast.success("Recording saved. Generating captions & chapters…");
+      toast.success("Recording saved.");
 
-      // Run Whisper on the audio for word-level timestamps, then build chapters.
-      // Audio-bearing modes only; camera-only / audio / screen+camera / screen (w/ mic)
-      // all have audio in the blob.
+      // Kick off Whisper transcription in the BACKGROUND (non-blocking).
+      // Captions + chapters will stream into the watch page via the store
+      // when ready. This keeps save/redirect instant.
       const hasAudio = mic || mode === "audio";
       if (hasAudio) {
-        await runTranscription(blob, rec.id);
+        // Mark the recording as transcribing so the watch page can show an
+        // indicator. Don't await.
+        useStore.getState().updateRecording(rec.id, { transcribing: true });
+        runTranscriptionInBackground(blob, rec.id);
       }
 
       router.push(`/watch/${rec.shareId}`);
@@ -483,39 +485,28 @@ export default function RecordingStudio() {
     }
   }
 
-  async function runTranscription(blob: Blob, recordingId: string) {
-    setTranscribing(true);
-    setTranscribeStatus("Preparing model…");
-    setTranscribeProgress(0);
-    try {
-      const { cues } = await transcribeBlob(blob, (p) => {
-        if (p.type === "download") {
-          setTranscribeStatus(`Downloading ${p.name}`);
-          setTranscribeProgress(p.progress ?? 0);
-        } else if (p.type === "loading") {
-          setTranscribeStatus(p.message);
-        } else if (p.type === "transcribing") {
-          setTranscribeStatus("Transcribing audio…");
-          setTranscribeProgress((p.progress ?? 0) * 100);
-        }
+  function runTranscriptionInBackground(blob: Blob, recordingId: string) {
+    transcribeBlob(blob, () => {})
+      .then(({ cues }) => {
+        const chapters = cuesToChapters(cues);
+        useStore.getState().updateRecording(recordingId, {
+          captions: cues,
+          chapters,
+          transcribing: false,
+        });
+        toast.success(
+          `Transcript ready · ${cues.length} cues · ${chapters.length} chapters`
+        );
+      })
+      .catch((e) => {
+        console.warn("Auto-transcription failed", e);
+        useStore
+          .getState()
+          .updateRecording(recordingId, { transcribing: false });
+        toast.message(
+          "Could not auto-generate captions. You can retry from the editor."
+        );
       });
-      const chapters = cuesToChapters(cues);
-      useStore
-        .getState()
-        .updateRecording(recordingId, { captions: cues, chapters });
-      toast.success(
-        `Transcript ready · ${cues.length} cues · ${chapters.length} chapters`
-      );
-    } catch (e) {
-      console.warn("Auto-transcription failed", e);
-      toast.message(
-        "Could not auto-generate captions. You can retry from the editor."
-      );
-    } finally {
-      setTranscribing(false);
-      setTranscribeStatus("");
-      setTranscribeProgress(0);
-    }
   }
 
   async function generateThumbnail(blob: Blob): Promise<string | undefined> {
@@ -743,29 +734,6 @@ export default function RecordingStudio() {
           </div>
         )}
 
-        {/* Transcription progress modal */}
-        {transcribing && (
-          <div className="fixed inset-0 z-50 bg-black/50 grid place-items-center p-4">
-            <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl">
-              <div className="flex items-center gap-3 mb-3">
-                <Loader2 className="size-5 animate-spin text-[var(--primary)]" />
-                <div className="font-semibold">Generating captions & chapters</div>
-              </div>
-              <p className="text-sm text-zinc-600 mb-4">
-                {transcribeStatus || "Running Whisper on the audio…"}
-              </p>
-              <div className="h-2 rounded-full bg-zinc-100 overflow-hidden">
-                <div
-                  className="h-full bg-[var(--primary)] transition-all"
-                  style={{ width: `${Math.min(100, Math.max(4, transcribeProgress))}%` }}
-                />
-              </div>
-              <p className="text-[11px] text-zinc-400 mt-3">
-                First run downloads the Whisper model (~75&nbsp;MB). Cached afterward.
-              </p>
-            </div>
-          </div>
-        )}
 
         {/* Device + toggles */}
         <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
