@@ -59,6 +59,10 @@ export default function RecordingStudio() {
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const screenVideoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Dedicated hidden <video> used as the Picture-in-Picture source so the
+  // camera bubble can float above every window/app while recording.
+  const pipVideoRef = useRef<HTMLVideoElement | null>(null);
+  const pipActiveRef = useRef(false);
 
   const screenStreamRef = useRef<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -467,12 +471,86 @@ export default function RecordingStudio() {
       }
 
       toast.success("Recording started");
+
+      // Open the camera in Picture-in-Picture so the bubble floats on top
+      // of every window/app and is draggable across the whole desktop.
+      if (
+        (mode === "screen-camera" || mode === "camera") &&
+        cameraOn &&
+        cameraStreamRef.current
+      ) {
+        void openCameraPiP();
+      }
     } catch (e) {
       console.error(e);
       toast.error("Could not start recording. Check permissions.");
       stopAllStreams();
       setStatus("idle");
       setCountdown(null);
+    }
+  }
+
+  async function openCameraPiP() {
+    try {
+      if (!("pictureInPictureEnabled" in document) || !document.pictureInPictureEnabled) {
+        return;
+      }
+      const cam = cameraStreamRef.current;
+      if (!cam) return;
+
+      if (!pipVideoRef.current) {
+        const v = document.createElement("video");
+        v.muted = true;
+        v.playsInline = true;
+        v.autoplay = true;
+        v.style.position = "fixed";
+        v.style.left = "-10000px";
+        v.style.top = "-10000px";
+        v.style.width = "320px";
+        v.style.height = "240px";
+        document.body.appendChild(v);
+        pipVideoRef.current = v;
+      }
+      const v = pipVideoRef.current;
+      v.srcObject = cam;
+      await v.play().catch(() => {});
+
+      if (document.pictureInPictureElement && document.pictureInPictureElement !== v) {
+        try {
+          await document.exitPictureInPicture();
+        } catch {}
+      }
+      await v.requestPictureInPicture();
+      pipActiveRef.current = true;
+      toast.message(
+        "Camera is now floating on top. Drag it anywhere on your screen."
+      );
+
+      v.addEventListener(
+        "leavepictureinpicture",
+        () => {
+          pipActiveRef.current = false;
+        },
+        { once: true }
+      );
+    } catch (e) {
+      console.warn("PiP failed", e);
+    }
+  }
+
+  async function closeCameraPiP() {
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      }
+    } catch {}
+    pipActiveRef.current = false;
+    const v = pipVideoRef.current;
+    if (v) {
+      try {
+        v.pause();
+        v.srcObject = null;
+      } catch {}
     }
   }
 
@@ -534,6 +612,7 @@ export default function RecordingStudio() {
       });
 
       stopAllStreams();
+      void closeCameraPiP();
       setStatus("stopped");
 
       // Build captions + chapters instantly from the live speech stream we
